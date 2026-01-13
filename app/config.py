@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     # OPIK Monitoring
     OPIK_API_KEY: Optional[str] = None  # Optional for monitoring
 
+    # Vanna 2.0 Configuration (Text-to-SQL)
+    VANNA_MODEL: str = "gpt-4o"  # OpenAI model for SQL generation
+    VANNA_PINECONE_INDEX: str = "vanna-sql-training"  # Dedicated Pinecone index for SQL training
+    VANNA_NAMESPACE: str = "sql-agent"  # Namespace within Pinecone index
+
     # Text Chunking Configuration
     CHUNK_SIZE: int = 512
     CHUNK_OVERLAP: int = 50

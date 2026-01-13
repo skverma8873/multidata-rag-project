@@ -11,6 +11,7 @@ import sys
 import shutil
 
 from app.config import settings
+from app.logging_config import setup_logging, get_logger
 from app.services.document_service import parse_document, chunk_text
 from app.services.embedding_service import EmbeddingService
 from app.services.vector_service import VectorService
@@ -21,6 +22,9 @@ from app.utils import (
     FileValidator, QueryValidator, ValidationError,
     ErrorResponse, format_file_size, truncate_text
 )
+
+# Initialize logging
+logger = setup_logging(log_level="INFO")
 
 # OPIK monitoring (optional - gracefully handles if not configured)
 try:
@@ -205,20 +209,20 @@ async def upload_document(file: UploadFile = File(...)):
             shutil.copyfileobj(file.file, buffer)
 
         # Parse document
-        print(f"Parsing document: {file.filename}")
+        logger.info(f"Parsing document: {file.filename}")
         text = parse_document(str(file_path))
 
         # Chunk text
-        print(f"Chunking text...")
+        logger.info(f"Chunking text into {settings.CHUNK_SIZE}-token chunks...")
         chunks = chunk_text(text, chunk_size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
 
         # Generate embeddings
-        print(f"Generating embeddings for {len(chunks)} chunks...")
+        logger.info(f"Generating embeddings for {len(chunks)} chunks...")
         texts = [chunk['text'] for chunk in chunks]
         embeddings = await embedding_service.generate_embeddings(texts)
 
         # Store in Pinecone
-        print(f"Storing vectors in Pinecone...")
+        logger.info(f"Storing {len(chunks)} vectors in Pinecone...")
         vector_service.add_documents(
             chunks=chunks,
             embeddings=embeddings,
@@ -429,11 +433,11 @@ async def unified_query(question: str, auto_approve_sql: bool = False, top_k: in
                 )
 
             # Generate SQL
-            sql_result = sql_service.generate_sql_for_approval(question)
+            sql_result = await sql_service.generate_sql_for_approval(question)
 
             if auto_approve_sql:
                 # Auto-execute for testing
-                execution_result = sql_service.execute_approved_query(
+                execution_result = await sql_service.execute_approved_query(
                     sql_result['query_id'],
                     approved=True
                 )
@@ -492,10 +496,10 @@ async def unified_query(question: str, auto_approve_sql: bool = False, top_k: in
                 )
 
             # Get SQL results
-            sql_result = sql_service.generate_sql_for_approval(question)
+            sql_result = await sql_service.generate_sql_for_approval(question)
 
             if auto_approve_sql:
-                execution_result = sql_service.execute_approved_query(
+                execution_result = await sql_service.execute_approved_query(
                     sql_result['query_id'],
                     approved=True
                 )
@@ -563,7 +567,7 @@ async def generate_sql(question: str):
         )
 
     try:
-        result = sql_service.generate_sql_for_approval(question)
+        result = await sql_service.generate_sql_for_approval(question)
         return result
 
     except Exception as e:
@@ -592,7 +596,7 @@ async def execute_sql(query_id: str, approved: bool = True):
         )
 
     try:
-        result = sql_service.execute_approved_query(query_id, approved)
+        result = await sql_service.execute_approved_query(query_id, approved)
 
         if result.get('status') == 'error':
             raise HTTPException(status_code=400, detail=result.get('error', 'Unknown error'))
@@ -638,76 +642,76 @@ async def startup_event():
     """Execute tasks on application startup."""
     global embedding_service, vector_service, rag_service, sql_service
 
-    print("=" * 60)
-    print("Starting Multi-Source RAG + Text-to-SQL API...")
-    print("=" * 60)
-    print("Phase 0: Foundation Setup - COMPLETE")
-    print("Phase 1: Document RAG MVP - COMPLETE")
-    print("Phase 2: Text-to-SQL Foundation - COMPLETE")
-    print("Phase 3: Query Routing - COMPLETE")
-    print("Phase 4: Evaluation & Monitoring - COMPLETE")
-    print("Phase 5: Polish & Documentation - COMPLETE")
-    print("Phase 6: Docker Deployment - COMPLETE")
-    print("=" * 60)
-    print("ALL PHASES COMPLETE - PRODUCTION READY!")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("Starting Multi-Source RAG + Text-to-SQL API...")
+    logger.info("=" * 60)
+    logger.info("Phase 0: Foundation Setup - COMPLETE")
+    logger.info("Phase 1: Document RAG MVP - COMPLETE")
+    logger.info("Phase 2: Text-to-SQL Foundation - COMPLETE")
+    logger.info("Phase 3: Query Routing - COMPLETE")
+    logger.info("Phase 4: Evaluation & Monitoring - COMPLETE")
+    logger.info("Phase 5: Polish & Documentation - COMPLETE")
+    logger.info("Phase 6: Docker Deployment - COMPLETE")
+    logger.info("=" * 60)
+    logger.info("ALL PHASES COMPLETE - PRODUCTION READY!")
+    logger.info("=" * 60)
 
     # Initialize OPIK monitoring if available
     if OPIK_AVAILABLE:
         try:
             if settings.OPIK_API_KEY:
-                print("\nInitializing OPIK monitoring...")
+                logger.info("Initializing OPIK monitoring...")
                 from opik import configure
                 configure(api_key=settings.OPIK_API_KEY)
-                print("✓ OPIK monitoring initialized!")
+                logger.info("✓ OPIK monitoring initialized!")
             else:
-                print("\nOPIK available but API key not configured.")
-                print("Monitoring will use local tracking only.")
+                logger.warning("OPIK available but API key not configured.")
+                logger.info("Monitoring will use local tracking only.")
         except Exception as e:
-            print(f"\nWARNING: Failed to initialize OPIK: {e}")
+            logger.warning(f"Failed to initialize OPIK: {e}")
     else:
-        print("\nOPIK not available (package not installed).")
+        logger.info("OPIK not available (package not installed).")
 
     # Initialize Document RAG services if API keys are available
     try:
         if settings.OPENAI_API_KEY and settings.PINECONE_API_KEY:
-            print("\nInitializing Document RAG services...")
+            logger.info("Initializing Document RAG services...")
             embedding_service = EmbeddingService()
             vector_service = VectorService()
             vector_service.connect_to_index()
             rag_service = RAGService()
-            print("✓ Document RAG services initialized!")
+            logger.info("✓ Document RAG services initialized!")
         else:
-            print("\nWARNING: OpenAI/Pinecone API keys not configured.")
-            print("Document RAG features will be unavailable.")
+            logger.warning("OpenAI/Pinecone API keys not configured.")
+            logger.warning("Document RAG features will be unavailable.")
     except Exception as e:
-        print(f"\nWARNING: Failed to initialize RAG services: {e}")
-        print("Document RAG features will be unavailable.")
+        logger.error(f"Failed to initialize RAG services: {e}", exc_info=True)
+        logger.warning("Document RAG features will be unavailable.")
 
     # Initialize Text-to-SQL service if database is available
     try:
         if settings.DATABASE_URL and settings.OPENAI_API_KEY:
-            print("\nInitializing Text-to-SQL service...")
+            logger.info("Initializing Text-to-SQL service...")
             sql_service = TextToSQLService()
-            print("Training Vanna on database schema and examples...")
+            logger.info("Training Vanna on database schema and examples...")
             sql_service.complete_training()
-            print("✓ Text-to-SQL service initialized and trained!")
+            logger.info("✓ Text-to-SQL service initialized and trained!")
         else:
-            print("\nWARNING: DATABASE_URL not configured.")
-            print("Text-to-SQL features will be unavailable.")
+            logger.warning("DATABASE_URL not configured.")
+            logger.warning("Text-to-SQL features will be unavailable.")
     except Exception as e:
-        print(f"\nWARNING: Failed to initialize SQL service: {e}")
-        print("Text-to-SQL features will be unavailable.")
+        logger.error(f"Failed to initialize SQL service: {e}", exc_info=True)
+        logger.warning("Text-to-SQL features will be unavailable.")
 
-    print("\n" + "=" * 60)
-    print("API is ready! Visit http://localhost:8000/docs")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("API is ready! Visit http://localhost:8000/docs")
+    logger.info("=" * 60)
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Execute cleanup tasks on application shutdown."""
-    print("Shutting down Multi-Source RAG + Text-to-SQL API...")
+    logger.info("Shutting down Multi-Source RAG + Text-to-SQL API...")
 
 
 if __name__ == "__main__":

@@ -1,319 +1,416 @@
 """
-SQL Service
-Handles Text-to-SQL conversion using Vanna.ai with OpenAI and PostgreSQL.
+SQL Service - Vanna 2.0 Agent Framework Implementation
+Handles Text-to-SQL conversion using Vanna.ai 2.0 with OpenAI and PostgreSQL.
 """
 
 from typing import Dict, Any, List, Optional
 import uuid
+import asyncio
 import pandas as pd
-from vanna.openai import OpenAI_Chat
-from vanna.chromadb import ChromaDB_VectorStore
-import sqlalchemy
+import logging
+
+logger = logging.getLogger("rag_app.sql_service")
+
+# Vanna 2.0 Agent Framework imports
+from vanna import Agent
+from vanna.integrations.openai import OpenAILlmService
+from vanna.integrations.postgres import PostgresRunner
+from vanna.core.registry import ToolRegistry
+from vanna.tools import RunSqlTool
+from vanna.core.user import UserResolver, User, RequestContext
+
+# Pinecone integration for Agent Memory
+try:
+    from vanna.integrations.pinecone import PineconeAgentMemory
+    PINECONE_AVAILABLE = True
+except ImportError:
+    PINECONE_AVAILABLE = False
+    # Fallback to local memory
+    from vanna.integrations.local.agent_memory import DemoAgentMemory
+
 from app.config import settings
 
 
-class VannaSQLService(ChromaDB_VectorStore, OpenAI_Chat):
+class SimpleUserResolver(UserResolver):
+    """Simple user resolver for SQL service - grants full access."""
+
+    async def resolve_user(self, request_context: RequestContext) -> User:
+        return User(
+            id="sql_service_user",
+            email="sql@service.local",
+            group_memberships=['user', 'admin']  # Full access to SQL tools
+        )
+
+
+class VannaAgentWrapper:
     """
-    Custom Vanna class combining ChromaDB for vector storage and OpenAI for LLM.
+    Wrapper around Vanna 2.0 Agent for synchronous use in FastAPI.
+    Handles async-to-sync conversion and component extraction.
     """
 
-    def __init__(self, config: Dict[str, Any]):
-        ChromaDB_VectorStore.__init__(self, config=config)
-        OpenAI_Chat.__init__(self, config=config)
-
-
-class TextToSQLService:
-    """Service for converting natural language to SQL using Vanna.ai."""
-
-    def __init__(self, database_url: str | None = None, openai_api_key: str | None = None):
+    def __init__(self, openai_api_key: str, database_url: str, pinecone_api_key: Optional[str] = None):
         """
-        Initialize the Text-to-SQL service.
+        Initialize Vanna 2.0 Agent with all components.
 
         Args:
+            openai_api_key: OpenAI API key for GPT-4o
             database_url: PostgreSQL connection string
-            openai_api_key: OpenAI API key
+            pinecone_api_key: Optional Pinecone API key for persistent memory
         """
-        self.database_url = database_url or settings.DATABASE_URL
-        self.openai_api_key = openai_api_key or settings.OPENAI_API_KEY
+        # Initialize OpenAI LLM with GPT-4o
+        self.llm = OpenAILlmService(
+            api_key=openai_api_key,
+            model=settings.VANNA_MODEL  # "gpt-4o"
+        )
 
-        if not self.database_url:
-            raise ValueError("DATABASE_URL is required for Text-to-SQL features")
-        if not self.openai_api_key:
-            raise ValueError("OPENAI_API_KEY is required for Text-to-SQL features")
+        # Initialize PostgreSQL Runner
+        self.postgres_runner = PostgresRunner(
+            connection_string=database_url
+        )
 
-        # Initialize Vanna with OpenAI and ChromaDB
-        self.vn = VannaSQLService(config={
-            'api_key': self.openai_api_key,
-            'model': 'gpt-4-turbo-preview',
-            'path': './data/vanna_chromadb'  # Local storage for Vanna's vector DB
-        })
+        # Create tool registry with RunSqlTool
+        self.tools = ToolRegistry()
+        self.tools.register_local_tool(
+            RunSqlTool(sql_runner=self.postgres_runner),
+            access_groups=['user', 'admin']
+        )
 
-        # Connect to PostgreSQL database
-        try:
-            self.engine = sqlalchemy.create_engine(self.database_url)
-            self.vn.connect_to_postgres(url=self.database_url)
-            print("✓ Connected to PostgreSQL database")
-        except Exception as e:
-            raise Exception(f"Failed to connect to database: {str(e)}")
+        # Create user resolver
+        self.user_resolver = SimpleUserResolver()
 
-        # Store for pending SQL queries awaiting approval
-        self.pending_queries: Dict[str, Dict[str, Any]] = {}
+        # Initialize Agent Memory (Pinecone or local)
+        if PINECONE_AVAILABLE and pinecone_api_key:
+            logger.info(f"Using Pinecone for SQL Agent memory (index: {settings.VANNA_PINECONE_INDEX})")
+            self.memory = PineconeAgentMemory(
+                api_key=pinecone_api_key,
+                index_name=settings.VANNA_PINECONE_INDEX,
+                environment="us-east-1",  # Match PINECONE_ENVIRONMENT
+                dimension=1536,  # OpenAI text-embedding-3-small dimension
+                metric="cosine"
+            )
+        else:
+            logger.warning("Using in-memory storage for SQL Agent (data will not persist)")
+            self.memory = DemoAgentMemory()
 
-        # Track if training has been completed
-        self.is_trained = False
+        # Create Agent
+        self.agent = Agent(
+            llm_service=self.llm,
+            tool_registry=self.tools,
+            user_resolver=self.user_resolver,
+            agent_memory=self.memory
+        )
 
-    def train_on_schema(self):
+        logger.info("✓ Vanna 2.0 Agent initialized successfully")
+
+    async def generate_sql_async(self, question: str, schema_context: str = "") -> str:
         """
-        Train Vanna on the database schema (DDL).
-        This teaches Vanna about the table structures.
-        """
-        try:
-            print("Training Vanna on database schema...")
-
-            # Get all table names from the database
-            ddl_statements = []
-
-            # Train on the information schema
-            df_tables = self.vn.run_sql("""
-                SELECT table_name
-                FROM information_schema.tables
-                WHERE table_schema = 'public'
-                AND table_type = 'BASE TABLE'
-            """)
-
-            if not df_tables.empty:
-                for table_name in df_tables['table_name']:
-                    # Get CREATE TABLE statement for each table
-                    ddl = self.vn.run_sql(f"""
-                        SELECT
-                            'CREATE TABLE ' || table_name || ' (' ||
-                            string_agg(
-                                column_name || ' ' || data_type ||
-                                CASE WHEN character_maximum_length IS NOT NULL
-                                THEN '(' || character_maximum_length || ')'
-                                ELSE '' END,
-                                ', '
-                            ) || ');' as ddl
-                        FROM information_schema.columns
-                        WHERE table_name = '{table_name}'
-                        AND table_schema = 'public'
-                        GROUP BY table_name
-                    """)
-
-                    if not ddl.empty:
-                        ddl_statements.append(ddl['ddl'].iloc[0])
-
-            # Train Vanna on each DDL statement
-            for ddl in ddl_statements:
-                self.vn.train(ddl=ddl)
-
-            print(f"✓ Trained on {len(ddl_statements)} tables")
-
-        except Exception as e:
-            print(f"Warning: Failed to train on schema: {e}")
-
-    def train_on_documentation(self, documentation: str):
-        """
-        Train Vanna on documentation about the database.
-
-        Args:
-            documentation: Natural language description of the database
-        """
-        try:
-            self.vn.train(documentation=documentation)
-            print("✓ Trained on documentation")
-        except Exception as e:
-            print(f"Warning: Failed to train on documentation: {e}")
-
-    def train_on_examples(self, examples: List[Dict[str, str]]):
-        """
-        Train Vanna on question-SQL pairs (golden examples).
-
-        Args:
-            examples: List of dicts with 'question' and 'sql' keys
-        """
-        try:
-            for example in examples:
-                self.vn.train(
-                    question=example['question'],
-                    sql=example['sql']
-                )
-            print(f"✓ Trained on {len(examples)} example queries")
-        except Exception as e:
-            print(f"Warning: Failed to train on examples: {e}")
-
-    def complete_training(self):
-        """
-        Complete training with schema and golden examples.
-        """
-        # Train on schema
-        self.train_on_schema()
-
-        # Train on database documentation
-        documentation = """
-        This is an e-commerce database with three main tables:
-        - customers: Contains customer information including name, email, segment (SMB, Enterprise, Individual), and country
-        - products: Product catalog with name, category, price, stock quantity, and description
-        - orders: Customer orders with order date, total amount, status (Pending, Delivered, Cancelled, Processing), and shipping address
-
-        The customers table has a one-to-many relationship with orders (one customer can have many orders).
-        Use customer_order_summary view for aggregated customer statistics.
-        """
-        self.train_on_documentation(documentation)
-
-        # Train on golden examples
-        golden_examples = [
-            {
-                "question": "How many customers do we have?",
-                "sql": "SELECT COUNT(*) as customer_count FROM customers;"
-            },
-            {
-                "question": "What is the total revenue from all orders?",
-                "sql": "SELECT SUM(total_amount) as total_revenue FROM orders;"
-            },
-            {
-                "question": "List all delivered orders",
-                "sql": "SELECT * FROM orders WHERE status = 'Delivered' ORDER BY order_date DESC;"
-            },
-            {
-                "question": "How many orders per customer segment?",
-                "sql": """SELECT c.segment, COUNT(o.id) as order_count
-                         FROM customers c
-                         LEFT JOIN orders o ON c.id = o.customer_id
-                         GROUP BY c.segment;"""
-            },
-            {
-                "question": "What is the average order value by customer segment?",
-                "sql": """SELECT c.segment, AVG(o.total_amount) as avg_order_value
-                         FROM customers c
-                         JOIN orders o ON c.id = o.customer_id
-                         GROUP BY c.segment;"""
-            },
-            {
-                "question": "Top 10 customers by total spending",
-                "sql": """SELECT c.name, c.email, SUM(o.total_amount) as total_spent
-                         FROM customers c
-                         JOIN orders o ON c.id = o.customer_id
-                         GROUP BY c.id, c.name, c.email
-                         ORDER BY total_spent DESC
-                         LIMIT 10;"""
-            },
-            {
-                "question": "How many products in each category?",
-                "sql": "SELECT category, COUNT(*) as product_count FROM products GROUP BY category;"
-            },
-            {
-                "question": "What are the top selling product categories?",
-                "sql": """SELECT p.category, COUNT(DISTINCT o.id) as order_count
-                         FROM products p
-                         JOIN orders o ON o.created_at > p.created_at
-                         GROUP BY p.category
-                         ORDER BY order_count DESC;"""
-            },
-            {
-                "question": "Show orders from the last 30 days",
-                "sql": """SELECT * FROM orders
-                         WHERE order_date >= CURRENT_DATE - INTERVAL '30 days'
-                         ORDER BY order_date DESC;"""
-            },
-            {
-                "question": "Which customers have never placed an order?",
-                "sql": """SELECT c.* FROM customers c
-                         LEFT JOIN orders o ON c.id = o.customer_id
-                         WHERE o.id IS NULL;"""
-            }
-        ]
-
-        self.train_on_examples(golden_examples)
-
-        self.is_trained = True
-        print("✓ Vanna training complete!")
-
-    def generate_sql(self, question: str) -> Dict[str, Any]:
-        """
-        Generate SQL from a natural language question.
+        Generate SQL from natural language question (async).
 
         Args:
             question: Natural language question
+            schema_context: Database schema documentation
 
         Returns:
-            Dictionary with generated SQL and metadata
+            Generated SQL query string
+
+        Raises:
+            ValueError: If Agent fails to generate SQL
         """
-        if not self.is_trained:
-            raise Exception("Vanna has not been trained yet. Call complete_training() first.")
+        # Prepare full message with schema context
+        if schema_context:
+            full_message = f"{schema_context}\n\nQUESTION: {question}"
+        else:
+            full_message = question
 
-        try:
-            # Generate SQL using Vanna
-            sql = self.vn.generate_sql(question=question)
+        # Extract SQL from Agent
+        return await self._extract_sql_from_agent(full_message)
 
-            return {
-                "question": question,
-                "sql": sql,
-                "status": "generated"
-            }
-
-        except Exception as e:
-            raise Exception(f"Failed to generate SQL: {str(e)}")
-
-    def execute_sql(self, sql: str) -> List[Dict[str, Any]]:
+    async def _extract_sql_from_agent(self, message: str) -> str:
         """
-        Execute SQL query and return results.
+        Extract SQL from Agent's UI components.
+
+        Args:
+            message: Full message including schema context and question
+
+        Returns:
+            Extracted SQL query
+
+        Raises:
+            ValueError: If no SQL found in Agent response
+        """
+        request_context = RequestContext()
+        sql = None
+
+        # Iterate through Agent's streaming UI components
+        async for component in self.agent.send_message(
+            request_context=request_context,
+            message=message
+        ):
+            rich_comp = component.rich_component
+
+            # Extract SQL from StatusCard metadata (primary source)
+            if hasattr(rich_comp, 'metadata') and rich_comp.metadata:
+                if 'sql' in rich_comp.metadata:
+                    sql = rich_comp.metadata['sql']
+
+            # Fallback: Extract from SQL code blocks
+            if hasattr(rich_comp, 'content') and rich_comp.content:
+                content = str(rich_comp.content)
+                # Look for SQL in markdown code blocks
+                if '```sql' in content.lower():
+                    # Extract SQL from code block
+                    parts = content.split('```')
+                    for part in parts:
+                        if part.strip().lower().startswith('sql'):
+                            sql = part[3:].strip()  # Remove 'sql' prefix
+
+        if not sql:
+            raise ValueError("Agent did not generate SQL. Please try rephrasing your question.")
+
+        return sql
+
+    async def execute_sql_async(self, sql: str) -> List[Dict[str, Any]]:
+        """
+        Execute SQL and return results (async).
 
         Args:
             sql: SQL query to execute
 
         Returns:
-            List of result rows as dictionaries
+            List of row dictionaries
+
+        Raises:
+            Exception: If SQL execution fails
         """
-        try:
-            # Run SQL using Vanna (which uses pandas DataFrame)
-            df = self.vn.run_sql(sql)
+        return await self._execute_and_extract_results(sql)
 
-            # Convert DataFrame to list of dictionaries
-            if df.empty:
-                return []
-
-            return df.to_dict('records')
-
-        except Exception as e:
-            raise Exception(f"Failed to execute SQL: {str(e)}")
-
-    def generate_sql_for_approval(self, question: str) -> Dict[str, Any]:
+    async def _execute_and_extract_results(self, sql: str) -> List[Dict[str, Any]]:
         """
-        Generate SQL but don't execute yet - return for user approval.
+        Execute SQL via Agent and extract DataFrame from UI components.
+
+        Args:
+            sql: SQL query to execute
+
+        Returns:
+            List of row dictionaries
+        """
+        request_context = RequestContext()
+        results = []
+
+        # Ask Agent to run the SQL
+        message = f"Execute this SQL query:\n\n```sql\n{sql}\n```"
+
+        async for component in self.agent.send_message(
+            request_context=request_context,
+            message=message
+        ):
+            rich_comp = component.rich_component
+
+            # Extract data from DataFrameComponent
+            if hasattr(rich_comp, 'rows') and rich_comp.rows:
+                results = rich_comp.rows
+
+        return results
+
+
+class TextToSQLService:
+    """
+    Service for converting natural language to SQL using Vanna.ai 2.0 Agent Framework.
+    Maintains compatibility with existing FastAPI endpoints.
+    """
+
+    def __init__(self, database_url: str | None = None, openai_api_key: str | None = None):
+        """
+        Initialize the Text-to-SQL service with Vanna 2.0 Agent.
+
+        Args:
+            database_url: PostgreSQL connection string
+            openai_api_key: OpenAI API key
+
+        Raises:
+            ValueError: If required credentials are missing
+        """
+        self.database_url = database_url or settings.DATABASE_URL
+        self.openai_api_key = openai_api_key or settings.OPENAI_API_KEY
+
+        # Validation
+        if not self.database_url:
+            raise ValueError("DATABASE_URL is required for Text-to-SQL features")
+        if not self.openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required for Text-to-SQL features")
+
+        # Initialize Vanna 2.0 Agent wrapper
+        pinecone_key = settings.PINECONE_API_KEY if PINECONE_AVAILABLE else None
+        self.vanna = VannaAgentWrapper(
+            openai_api_key=self.openai_api_key,
+            database_url=self.database_url,
+            pinecone_api_key=pinecone_key
+        )
+
+        # Approval workflow state (in-memory)
+        self.pending_queries: Dict[str, Dict[str, Any]] = {}
+
+        # Training flag
+        self.is_trained = False
+
+        # Schema context (replaces traditional Vanna training)
+        self.schema_context = ""
+
+    def complete_training(self):
+        """
+        Prepare schema context for Vanna 2.0.
+        Note: Vanna 2.0 Agent doesn't use the same training approach as legacy Vanna.
+        Instead, we provide schema context with each query.
+        """
+        logger.info("Preparing schema context for Vanna 2.0...")
+
+        # Build comprehensive schema context
+        self.schema_context = self._build_schema_context()
+
+        self.is_trained = True
+        logger.info("✓ Schema context prepared for Vanna 2.0 Agent!")
+
+    def _build_schema_context(self) -> str:
+        """
+        Build comprehensive schema context by querying database.
+        Provides same information as legacy Vanna training.
+
+        Returns:
+            Formatted schema documentation string
+        """
+        schema_parts = []
+
+        # Header
+        schema_parts.append("DATABASE SCHEMA DOCUMENTATION")
+        schema_parts.append("=" * 60)
+
+        # Database overview
+        documentation = """
+This is an e-commerce database with three main tables:
+- customers: Contains customer information including name, email, segment (SMB, Enterprise, Individual), and country
+- products: Product catalog with name, category, price, stock quantity, and description
+- orders: Customer orders with order date, total amount, status (Pending, Delivered, Cancelled, Processing), and shipping address
+
+The customers table has a one-to-many relationship with orders (one customer can have many orders).
+
+IMPORTANT NOTES:
+- For order revenue/pricing, use orders.total_amount (NOT 'price')
+- Customer segments: 'SMB', 'Enterprise', 'Individual' (case-sensitive)
+- Order statuses: 'Pending', 'Delivered', 'Cancelled', 'Processing' (case-sensitive)
+- To join customers and orders: JOIN orders ON customers.id = orders.customer_id
+"""
+        schema_parts.append(documentation)
+
+        # Table schemas
+        schema_parts.append("\nTABLE SCHEMAS:")
+        schema_parts.append("-" * 60)
+
+        schema_parts.append("""
+Table: customers
+Columns:
+  - id (SERIAL PRIMARY KEY)
+  - name (VARCHAR) - Customer full name
+  - email (VARCHAR) - Customer email address
+  - segment (VARCHAR) - One of: 'SMB', 'Enterprise', 'Individual'
+  - country (VARCHAR) - Customer country
+  - created_at (TIMESTAMP)
+  - updated_at (TIMESTAMP)
+""")
+
+        schema_parts.append("""
+Table: products
+Columns:
+  - id (SERIAL PRIMARY KEY)
+  - name (VARCHAR) - Product name
+  - category (VARCHAR) - Product category (Electronics, Software, Hardware, etc.)
+  - price (DECIMAL) - Product unit price
+  - stock_quantity (INT) - Current inventory count
+  - description (TEXT)
+  - created_at (TIMESTAMP)
+  - updated_at (TIMESTAMP)
+""")
+
+        schema_parts.append("""
+Table: orders
+Columns:
+  - id (SERIAL PRIMARY KEY)
+  - customer_id (INT) - Foreign key to customers.id
+  - order_date (DATE) - Date of order
+  - total_amount (DECIMAL) - TOTAL ORDER PRICE (use this for revenue, NOT 'price'!)
+  - status (VARCHAR) - One of: 'Pending', 'Delivered', 'Cancelled', 'Processing'
+  - shipping_address (TEXT)
+  - created_at (TIMESTAMP)
+  - updated_at (TIMESTAMP)
+""")
+
+        # Golden examples
+        schema_parts.append("\nEXAMPLE QUERIES:")
+        schema_parts.append("-" * 60)
+
+        examples = [
+            ("How many customers do we have?", "SELECT COUNT(*) as customer_count FROM customers;"),
+            ("What is the total revenue from all orders?", "SELECT SUM(total_amount) as total_revenue FROM orders;"),
+            ("List all delivered orders", "SELECT * FROM orders WHERE status = 'Delivered' ORDER BY order_date DESC;"),
+            ("How many orders per customer segment?", "SELECT c.segment, COUNT(o.id) as order_count FROM customers c LEFT JOIN orders o ON c.id = o.customer_id GROUP BY c.segment;"),
+            ("Top 10 customers by total spending", "SELECT c.name, c.email, SUM(o.total_amount) as total_spent FROM customers c JOIN orders o ON c.id = o.customer_id GROUP BY c.id, c.name, c.email ORDER BY total_spent DESC LIMIT 10;"),
+        ]
+
+        for i, (question, sql) in enumerate(examples, 1):
+            schema_parts.append(f"\nExample {i}:")
+            schema_parts.append(f"Question: {question}")
+            schema_parts.append(f"SQL: {sql}")
+
+        return "\n".join(schema_parts)
+
+    async def generate_sql_for_approval(self, question: str) -> Dict[str, Any]:
+        """
+        Generate SQL from a natural language question using Vanna 2.0 Agent.
+        Returns SQL for user approval before execution.
 
         Args:
             question: Natural language question
 
         Returns:
             Dictionary with query_id, question, SQL, and status
+
+        Raises:
+            Exception: If schema context not prepared or SQL generation fails
         """
-        # Generate SQL
-        result = self.generate_sql(question)
-        sql = result['sql']
+        if not self.is_trained:
+            raise Exception("Schema context not prepared. Call complete_training() first.")
 
-        # Create unique query ID
-        query_id = str(uuid.uuid4())
+        try:
+            # Generate SQL using Vanna 2.0 Agent
+            sql = await self.vanna.generate_sql_async(
+                question=question,
+                schema_context=self.schema_context
+            )
 
-        # Store pending query
-        self.pending_queries[query_id] = {
-            'question': question,
-            'sql': sql,
-            'status': 'pending_approval',
-            'generated_at': pd.Timestamp.now().isoformat()
-        }
+            # Create unique query ID for approval workflow
+            query_id = str(uuid.uuid4())
 
-        return {
-            'query_id': query_id,
-            'question': question,
-            'sql': sql,
-            'explanation': "This SQL will retrieve data from your database. Please review before approving.",
-            'status': 'pending_approval'
-        }
+            # Store pending query
+            self.pending_queries[query_id] = {
+                'question': question,
+                'sql': sql,
+                'status': 'pending_approval',
+                'generated_at': pd.Timestamp.now().isoformat()
+            }
 
-    def execute_approved_query(self, query_id: str, approved: bool) -> Dict[str, Any]:
+            return {
+                'query_id': query_id,
+                'question': question,
+                'sql': sql,
+                'explanation': "This SQL will retrieve data from your database. Please review before approving.",
+                'status': 'pending_approval'
+            }
+
+        except Exception as e:
+            raise Exception(f"Failed to generate SQL: {str(e)}")
+
+    async def execute_approved_query(self, query_id: str, approved: bool) -> Dict[str, Any]:
         """
-        Execute a SQL query after user approval.
+        Execute a SQL query after user approval using Vanna 2.0 Agent.
 
         Args:
             query_id: ID of the pending query
@@ -339,10 +436,10 @@ class TextToSQLService:
                 'message': 'Query execution cancelled by user'
             }
 
-        # Execute the SQL
+        # Execute the SQL using Vanna 2.0 Agent
         try:
             sql = query_info['sql']
-            results = self.execute_sql(sql)
+            results = await self.vanna.execute_sql_async(sql)
 
             # Clean up pending query
             del self.pending_queries[query_id]

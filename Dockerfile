@@ -57,7 +57,8 @@ COPY evaluate.py .
 COPY tests/ ./tests/
 
 # Create necessary directories
-RUN mkdir -p data/uploads data/vanna_chromadb
+RUN mkdir -p data/uploads
+# Note: Vanna 2.0 now uses Pinecone cloud storage (no local vanna_chromadb needed)
 
 # Expose port
 EXPOSE 8000

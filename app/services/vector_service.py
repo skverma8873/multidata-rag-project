@@ -4,9 +4,12 @@ Handles vector storage and retrieval using Pinecone.
 """
 
 from typing import List, Dict, Any
+import logging
 from pinecone.grpc import PineconeGRPC
 from pinecone import ServerlessSpec
 from app.config import settings
+
+logger = logging.getLogger("rag_app.vector_service")
 
 
 class VectorService:
@@ -42,7 +45,7 @@ class VectorService:
 
             if self.index_name not in index_names:
                 # Create index if it doesn't exist
-                print(f"Creating Pinecone index: {self.index_name}")
+                logger.info(f"Creating Pinecone index: {self.index_name}")
                 self.pc.create_index(
                     name=self.index_name,
                     dimension=1536,  # OpenAI text-embedding-3-small dimension
@@ -52,12 +55,12 @@ class VectorService:
                         region=self.environment.split("-")[0]  # Extract region from environment
                     )
                 )
-                print(f"Index {self.index_name} created successfully")
+                logger.info(f"Index {self.index_name} created successfully")
 
             # Connect to the index
             index_description = self.pc.describe_index(name=self.index_name)
             self.index = self.pc.Index(host=index_description.host)
-            print(f"Connected to Pinecone index: {self.index_name}")
+            logger.info(f"Connected to Pinecone index: {self.index_name}")
 
         except Exception as e:
             raise Exception(f"Failed to connect to Pinecone index: {str(e)}")
@@ -117,7 +120,7 @@ class VectorService:
                     namespace=namespace
                 )
 
-            print(f"Successfully upserted {len(vectors_to_upsert)} vectors to Pinecone")
+            logger.info(f"Successfully upserted {len(vectors_to_upsert)} vectors to Pinecone")
 
         except Exception as e:
             raise Exception(f"Failed to add documents to Pinecone: {str(e)}")
@@ -220,7 +223,7 @@ class VectorService:
                 filter={"filename": {"$eq": filename}},
                 namespace=namespace
             )
-            print(f"Deleted all vectors for filename: {filename}")
+            logger.info(f"Deleted all vectors for filename: {filename}")
 
         except Exception as e:
             raise Exception(f"Failed to delete vectors: {str(e)}")
