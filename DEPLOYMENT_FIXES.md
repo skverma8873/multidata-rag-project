@@ -160,6 +160,67 @@ handler = Mangum(app, lifespan="off", api_gateway_base_path="/prod")
 
 ---
 
+### Issue 6: Swagger UI 404 Error ✅ FIXED
+**Problem:** Swagger UI at `/prod/docs` showing "Failed to load API definition" with error "404 /openapi.json"
+
+**Error:**
+```
+Failed to load API definition.
+Fetch error
+response status is 404 /openapi.json
+```
+
+**Root Cause:** FastAPI was trying to fetch OpenAPI JSON from `/openapi.json` but it should be `/prod/openapi.json` because the API is served under the `/prod` base path in API Gateway.
+
+FastAPI needs to know about the `root_path` so it can generate correct URLs for:
+- `/openapi.json` → `/prod/openapi.json`
+- Internal redirects and links
+- Swagger UI asset loading
+
+**Solution:**
+
+1. Added `ROOT_PATH` setting to `app/config.py`:
+```python
+# Application
+ROOT_PATH: str = ""  # Set to "/prod" for API Gateway, empty for local development
+```
+
+2. Updated FastAPI initialization in `app/main.py`:
+```python
+app = FastAPI(
+    title="Multi-Source RAG + Text-to-SQL API",
+    description="A system that combines document RAG with natural language to SQL conversion",
+    version="0.1.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    root_path=settings.ROOT_PATH,  # For API Gateway: "/prod", for local: ""
+)
+```
+
+3. Set `ROOT_PATH="/prod"` in `lambda_handler.py`:
+```python
+# Set root path for API Gateway
+# This tells FastAPI it's being served under /prod so OpenAPI JSON URLs are correct
+os.environ["ROOT_PATH"] = "/prod"
+```
+
+**Technical Details:**
+- `root_path` tells FastAPI the base path it's mounted under
+- Mangum already handles base path stripping with `api_gateway_base_path="/prod"`
+- But FastAPI needs `root_path` for generating correct OpenAPI URLs
+- These two settings work together for proper API Gateway integration
+
+**After Fix, These URLs Work:**
+- `https://API_URL/prod/docs` - Swagger UI ✅
+- `https://API_URL/prod/redoc` - ReDoc documentation ✅
+- `https://API_URL/prod/openapi.json` - OpenAPI schema ✅
+
+**Key Learning:** When deploying FastAPI behind API Gateway with a stage prefix (like `/prod`), you need BOTH:
+1. Mangum's `api_gateway_base_path` parameter (for request routing)
+2. FastAPI's `root_path` parameter (for URL generation)
+
+---
+
 ## ✅ Final Working Configuration
 
 ### Lambda Function:
@@ -339,8 +400,9 @@ Compare to x86_64:
 - ✅ File permissions correct
 - ✅ Mangum adapter working with API Gateway base path
 - ✅ Service initialization working (embedding, vector, RAG, SQL, cache)
-- ✅ All configurations verified
 - ✅ FastAPI lifespan compatibility resolved
+- ✅ Swagger UI and OpenAPI documentation working
+- ✅ All configurations verified
 
 ---
 
@@ -357,7 +419,9 @@ Compare to x86_64:
 
 **Service initialization fix completed on 2026-01-16**
 
-🎉 **Lambda is fully operational with all services initialized!**
+**Swagger UI fix completed on 2026-01-16**
+
+🎉 **Lambda is fully operational with all features working!**
 
 All issues resolved:
 - ✅ Architecture mismatch (ARM64)
@@ -365,3 +429,4 @@ All issues resolved:
 - ✅ File permissions (755/644)
 - ✅ Mangum base path (/prod)
 - ✅ Service initialization (manual init function)
+- ✅ Swagger UI and OpenAPI docs (root_path configuration)
