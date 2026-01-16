@@ -85,6 +85,81 @@ handler = Mangum(app, lifespan="off", api_gateway_base_path="/prod")
 
 ---
 
+### Issue 5: Service Initialization ✅ FIXED
+**Problem:** FastAPI startup events don't execute with Mangum when lifespan="off"
+
+**Error:**
+Health check showed all services as unavailable:
+```json
+{
+  "services": {
+    "embedding_service": false,
+    "vector_service": false,
+    "rag_service": false,
+    "sql_service": false
+  }
+}
+```
+
+**Root Cause:** The `@app.on_event("startup")` decorator doesn't execute with Mangum when `lifespan="off"`. This left all global service variables as `None`.
+
+**Solution:**
+1. Created standalone `initialize_services()` function in `app/main.py`
+2. Called from `lambda_handler.py` on container startup
+3. FastAPI startup event now calls the same function
+
+**Code Changes:**
+
+In `app/main.py`:
+```python
+def initialize_services():
+    """Initialize all services. Called directly on Lambda startup or via FastAPI startup event."""
+    global embedding_service, vector_service, rag_service, sql_service, cache_service
+
+    # Ensure upload and cache directories exist
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Initialize OPIK monitoring if available
+    if OPIK_AVAILABLE and settings.OPIK_API_KEY:
+        configure(api_key=settings.OPIK_API_KEY)
+
+    # Initialize Document RAG services
+    if settings.OPENAI_API_KEY and settings.PINECONE_API_KEY:
+        embedding_service = EmbeddingService()
+        vector_service = VectorService()
+        vector_service.connect_to_index()
+        rag_service = RAGService()
+
+    # Initialize Text-to-SQL service
+    if settings.DATABASE_URL and settings.OPENAI_API_KEY:
+        sql_service = TextToSQLService()
+        sql_service.complete_training()
+
+    # Initialize cache service
+    cache_service = CacheService(cache_dir=CACHE_DIR)
+
+@app.on_event("startup")
+async def startup_event():
+    """Execute tasks on application startup."""
+    initialize_services()
+```
+
+In `lambda_handler.py`:
+```python
+# Initialize services before creating handler (since lifespan="off")
+# This runs once when Lambda container starts
+from app.main import initialize_services
+initialize_services()
+
+# Lambda handler
+handler = Mangum(app, lifespan="off", api_gateway_base_path="/prod")
+```
+
+**Key Learning:** When using Mangum with `lifespan="off"`, manually initialize services before creating the handler. FastAPI lifecycle events won't execute in Lambda.
+
+---
+
 ## ✅ Final Working Configuration
 
 ### Lambda Function:
@@ -262,8 +337,10 @@ Compare to x86_64:
 - ✅ API Gateway responding with 200 OK
 - ✅ Health endpoint returning JSON
 - ✅ File permissions correct
-- ✅ Mangum adapter working
+- ✅ Mangum adapter working with API Gateway base path
+- ✅ Service initialization working (embedding, vector, RAG, SQL, cache)
 - ✅ All configurations verified
+- ✅ FastAPI lifespan compatibility resolved
 
 ---
 
@@ -276,6 +353,15 @@ Compare to x86_64:
 
 ---
 
-**Deployment completed successfully on 2026-01-16 at 09:08 UTC**
+**Deployment completed successfully on 2026-01-16**
 
-🎉 **Lambda is live and responding!**
+**Service initialization fix completed on 2026-01-16**
+
+🎉 **Lambda is fully operational with all services initialized!**
+
+All issues resolved:
+- ✅ Architecture mismatch (ARM64)
+- ✅ API Gateway integration (correct account)
+- ✅ File permissions (755/644)
+- ✅ Mangum base path (/prod)
+- ✅ Service initialization (manual init function)
