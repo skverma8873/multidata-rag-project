@@ -3,7 +3,7 @@ Embedding Service
 Handles generation of embeddings using OpenAI's API.
 """
 
-from typing import List
+from typing import List, Tuple, Optional, Dict
 from openai import AsyncOpenAI
 from app.config import settings
 
@@ -26,7 +26,7 @@ class EmbeddingService:
         self.model = "text-embedding-3-small"  # 1536 dimensions
         self.dimensions = 1536
 
-    async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+    async def generate_embeddings(self, texts: List[str]) -> Tuple[List[List[float]], Optional[Dict]]:
         """
         Generate embeddings for a list of texts.
         Processes in batches for efficiency.
@@ -35,13 +35,15 @@ class EmbeddingService:
             texts: List of text strings to embed
 
         Returns:
-            List of embedding vectors (each is a list of floats)
+            Tuple of (embeddings, usage_info) where:
+            - embeddings: List of embedding vectors (each is a list of floats)
+            - usage_info: Dict with token counts and model info for cost tracking
 
         Raises:
             Exception: If embedding generation fails
         """
         if not texts:
-            return []
+            return [], None
 
         try:
             # OpenAI API handles batching internally
@@ -54,7 +56,14 @@ class EmbeddingService:
             # Extract embeddings in the same order as input
             embeddings = [item.embedding for item in response.data]
 
-            return embeddings
+            # Extract usage information for cost tracking
+            usage_info = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "total_tokens": response.usage.total_tokens,
+                "model": self.model
+            } if hasattr(response, 'usage') and response.usage else None
+
+            return embeddings, usage_info
 
         except Exception as e:
             raise Exception(f"Failed to generate embeddings: {str(e)}")
@@ -69,7 +78,7 @@ class EmbeddingService:
         Returns:
             Embedding vector (list of floats)
         """
-        embeddings = await self.generate_embeddings([text])
+        embeddings, _ = await self.generate_embeddings([text])
         return embeddings[0]
 
     def get_embedding_dimension(self) -> int:

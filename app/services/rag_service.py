@@ -59,8 +59,9 @@ class RAGService:
                 - model: LLM model used
         """
         try:
-            # Step 1: Generate query embedding
-            query_embedding = await self.embedding_service.generate_single_embedding(question)
+            # Step 1: Generate query embedding with usage tracking
+            embeddings, embedding_usage = await self.embedding_service.generate_embeddings([question])
+            query_embedding = embeddings[0]
 
             # Step 2: Search for relevant chunks in Pinecone
             search_results = await self.vector_service.search(
@@ -77,7 +78,8 @@ class RAGService:
                     "answer": "I don't have enough information to answer that question. Please upload relevant documents first.",
                     "sources": [],
                     "chunks_used": 0,
-                    "model": self.model
+                    "model": self.model,
+                    "usage": None  # No LLM call made
                 }
 
             # Step 3: Build context from retrieved chunks
@@ -107,12 +109,31 @@ class RAGService:
 
             answer = response.choices[0].message.content
 
-            # Step 6: Format response
+            # Extract LLM usage information for cost tracking
+            llm_usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens
+            } if hasattr(response, 'usage') and response.usage else None
+
+            # Combine embedding + LLM usage
+            combined_usage = {
+                "embedding_tokens": embedding_usage['total_tokens'] if embedding_usage else 0,
+                "llm_prompt_tokens": llm_usage['prompt_tokens'] if llm_usage else 0,
+                "llm_completion_tokens": llm_usage['completion_tokens'] if llm_usage else 0,
+                "total_tokens": (
+                    (embedding_usage['total_tokens'] if embedding_usage else 0) +
+                    (llm_usage['total_tokens'] if llm_usage else 0)
+                )
+            }
+
+            # Step 6: Format response with usage data
             result = {
                 "question": question,
                 "answer": answer,
                 "chunks_used": len(chunks),
-                "model": self.model
+                "model": self.model,
+                "usage": combined_usage  # NEW: Include usage data for OPIK cost tracking
             }
 
             if include_sources:
@@ -223,7 +244,7 @@ Answer:"""
             Dictionary with retrieved chunks and metadata
         """
         try:
-            # Generate query embedding
+            # Generate query embedding (using single_embedding for simplicity here)
             query_embedding = await self.embedding_service.generate_single_embedding(question)
 
             # Search for relevant chunks

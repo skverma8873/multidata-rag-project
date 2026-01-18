@@ -260,7 +260,7 @@ async def upload_document(file: UploadFile = File(...)):
             # Generate embeddings
             logger.info(f"Generating embeddings for {len(chunks)} chunks...")
             texts = [chunk['text'] for chunk in chunks]
-            embeddings = await embedding_service.generate_embeddings(texts)
+            embeddings, embedding_usage = await embedding_service.generate_embeddings(texts)
 
             # NEW: Save to cache if cache service is available
             if cache_service and doc_id:
@@ -300,6 +300,32 @@ async def upload_document(file: UploadFile = File(...)):
         )
 
         file_size = file_path.stat().st_size
+        total_tokens = sum(chunk['token_count'] for chunk in chunks)
+        file_extension = file_path.suffix.lstrip('.')
+
+        # Update OPIK span with metadata for observability
+        if OPIK_AVAILABLE:
+            try:
+                from opik.opik_context import update_current_span
+
+                update_current_span(
+                    tags=[
+                        "document_upload",
+                        f"extension_{file_extension}",
+                        "cache_hit" if cache_hit else "cache_miss"
+                    ],
+                    metadata={
+                        "filename": file.filename,
+                        "file_size_bytes": file_size,
+                        "file_size_human": format_file_size(file_size),
+                        "file_extension": file_extension,
+                        "chunk_count": len(chunks),
+                        "total_tokens": total_tokens,
+                        "cache_hit": cache_hit
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update OPIK span: {e}")
 
         return {
             "status": "success",
@@ -308,7 +334,7 @@ async def upload_document(file: UploadFile = File(...)):
             "file_size": format_file_size(file_size),
             "file_size_bytes": file_size,
             "chunks_created": len(chunks),
-            "total_tokens": sum(chunk['token_count'] for chunk in chunks),
+            "total_tokens": total_tokens,
             "cache_hit": cache_hit,  # NEW: Indicate if cache was used
             "message": (
                 f"Document loaded from cache and {len(chunks)} chunks stored in Pinecone"
@@ -330,7 +356,7 @@ async def upload_document(file: UploadFile = File(...)):
 
 
 @app.post("/query/documents", status_code=status.HTTP_200_OK, tags=["Query"])
-@track(name="query_documents")
+@track(name="query_documents", type="llm")
 async def query_documents(question: str, top_k: int = 3):
     """
     Query documents using RAG (Retrieval-Augmented Generation).
@@ -375,6 +401,37 @@ async def query_documents(question: str, top_k: int = 3):
             namespace="default",
             include_sources=True
         )
+
+        # Update OPIK span with metadata and cost tracking
+        if OPIK_AVAILABLE:
+            try:
+                from opik.opik_context import update_current_span
+
+                usage_data = result.get('usage')
+
+                span_update = {
+                    "tags": ["document_query", f"top_k_{top_k}"],
+                    "metadata": {
+                        "question_length": len(question),
+                        "top_k": top_k,
+                        "chunks_retrieved": result.get('chunks_used', 0),
+                        "model": result.get('model', 'unknown')
+                    },
+                    "model": "gpt-4-turbo-preview",
+                    "provider": "openai"
+                }
+
+                # Add usage data for cost tracking
+                if usage_data:
+                    span_update["usage"] = {
+                        "prompt_tokens": usage_data['embedding_tokens'] + usage_data['llm_prompt_tokens'],
+                        "completion_tokens": usage_data['llm_completion_tokens'],
+                        "total_tokens": usage_data['total_tokens']
+                    }
+
+                update_current_span(**span_update)
+            except Exception as e:
+                logger.warning(f"Failed to update OPIK span: {e}")
 
         return result
 
@@ -570,6 +627,27 @@ async def unified_query(question: str, auto_approve_sql: bool = False, top_k: in
             "routing_explanation": QueryRouter.explain_routing(question)
         }
 
+        # Update OPIK span with routing metadata
+        if OPIK_AVAILABLE:
+            try:
+                from opik.opik_context import update_current_span
+
+                update_current_span(
+                    tags=[
+                        "unified_query",
+                        f"route_{route_type.lower()}",
+                        "auto_approve" if auto_approve_sql else "manual_approve"
+                    ],
+                    metadata={
+                        "question_length": len(question),
+                        "route_type": route_type,
+                        "auto_approve_sql": auto_approve_sql,
+                        "top_k": top_k
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update OPIK span: {e}")
+
         # Route to SQL
         if route_type == "SQL":
             if not sql_service:
@@ -692,7 +770,7 @@ async def unified_query(question: str, auto_approve_sql: bool = False, top_k: in
 
 
 @app.post("/query/sql/generate", status_code=status.HTTP_200_OK, tags=["SQL"])
-@track(name="generate_sql")
+@track(name="generate_sql", type="llm")
 async def generate_sql(question: str):
     """
     Generate SQL from a natural language question using Vanna.ai.
@@ -714,6 +792,26 @@ async def generate_sql(question: str):
 
     try:
         result = await sql_service.generate_sql_for_approval(question)
+
+        # Update OPIK span with metadata
+        if OPIK_AVAILABLE:
+            try:
+                from opik.opik_context import update_current_span
+
+                update_current_span(
+                    tags=["sql_generation", "text_to_sql"],
+                    metadata={
+                        "question_length": len(question),
+                        "sql_length": len(result.get('sql', '')),
+                        "query_id": result.get('query_id'),
+                        "model": settings.VANNA_MODEL
+                    },
+                    model=settings.VANNA_MODEL,
+                    provider="openai"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update OPIK span: {e}")
+
         return result
 
     except Exception as e:
@@ -746,6 +844,26 @@ async def execute_sql(query_id: str, approved: bool = True):
 
         if result.get('status') == 'error':
             raise HTTPException(status_code=400, detail=result.get('error', 'Unknown error'))
+
+        # Update OPIK span with metadata
+        if OPIK_AVAILABLE:
+            try:
+                from opik.opik_context import update_current_span
+
+                update_current_span(
+                    tags=[
+                        "sql_execution",
+                        "approved" if approved else "rejected"
+                    ],
+                    metadata={
+                        "query_id": query_id,
+                        "approved": approved,
+                        "result_count": result.get('result_count', 0),
+                        "status": result.get('status')
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update OPIK span: {e}")
 
         return result
 
