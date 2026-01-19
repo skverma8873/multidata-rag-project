@@ -199,7 +199,58 @@ OPIK_API_KEY=  # Leave empty for local tracking
 # Text Chunking Configuration
 CHUNK_SIZE=512
 CHUNK_OVERLAP=50
+
+# SQL LLM Configuration (Determinism)
+VANNA_TEMPERATURE=0.0  # 0.0 = fully deterministic, 1.0 = creative
+VANNA_TOP_P=0.1
+VANNA_SEED=42
+VANNA_MAX_TOKENS=1000
 ```
+
+### SQL Determinism Configuration
+
+**Why SQL Generation Needs Determinism:**
+
+By default, language models use high randomness (temperature=1.0), which causes **inconsistent SQL generation** - the same question produces different SQL queries on each run. This is problematic for production systems where users expect predictable results.
+
+**Solution:**
+
+The system now enforces **deterministic SQL generation** by controlling the LLM's randomness parameters:
+
+- **`VANNA_TEMPERATURE`** (default: `0.0`): Controls randomness
+  - `0.0` = Fully deterministic (recommended for production)
+  - `0.1-0.2` = Slight variation while maintaining consistency
+  - `1.0` = Creative but unpredictable
+
+- **`VANNA_TOP_P`** (default: `0.1`): Nucleus sampling threshold
+  - Lower values = More focused on high-probability tokens
+  - Higher values = Considers more token alternatives
+
+- **`VANNA_SEED`** (default: `42`): Random seed for reproducibility
+  - Ensures identical queries produce identical SQL across runs
+
+- **`VANNA_MAX_TOKENS`** (default: `1000`): Maximum SQL length
+  - Prevents excessively long query generation
+
+**Configuration Examples:**
+
+```env
+# Production (fully deterministic)
+VANNA_TEMPERATURE=0.0
+VANNA_TOP_P=0.1
+
+# Development (slight variation for testing edge cases)
+VANNA_TEMPERATURE=0.1
+VANNA_TOP_P=0.2
+
+# Creative mode (NOT recommended - for experimentation only)
+VANNA_TEMPERATURE=0.5
+VANNA_TOP_P=0.5
+```
+
+**Expected Behavior:**
+- With `VANNA_TEMPERATURE=0.0`: Same question → Identical SQL (>95% of time)
+- Without determinism: Same question → Different SQL each time ❌
 
 ## 📖 Usage
 

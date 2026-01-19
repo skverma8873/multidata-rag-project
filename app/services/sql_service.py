@@ -63,6 +63,38 @@ class VannaAgentWrapper:
             model=settings.VANNA_MODEL  # "gpt-4o"
         )
 
+        # Monkey-patch LLM to inject determinism parameters
+        # This ensures consistent SQL generation across multiple runs
+        logger.info(
+            f"Configuring SQL LLM with deterministic settings: "
+            f"temperature={settings.VANNA_TEMPERATURE}, "
+            f"top_p={settings.VANNA_TOP_P}, "
+            f"seed={settings.VANNA_SEED}"
+        )
+
+        # Store original _build_payload method
+        original_build_payload = self.llm._build_payload
+
+        # Create wrapper that injects determinism parameters
+        def deterministic_build_payload(request):
+            """Wraps Vanna's _build_payload to add temperature, top_p, and seed."""
+            payload = original_build_payload(request)
+
+            # Inject determinism parameters
+            payload['temperature'] = settings.VANNA_TEMPERATURE
+            payload['top_p'] = settings.VANNA_TOP_P
+            payload['seed'] = settings.VANNA_SEED
+
+            # Override max_tokens if configured
+            if settings.VANNA_MAX_TOKENS:
+                payload['max_tokens'] = settings.VANNA_MAX_TOKENS
+
+            logger.debug(f"SQL LLM payload: {payload}")
+            return payload
+
+        # Replace the method with our wrapper
+        self.llm._build_payload = deterministic_build_payload
+
         # Initialize PostgreSQL Runner
         self.postgres_runner = PostgresRunner(
             connection_string=database_url
