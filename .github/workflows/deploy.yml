@@ -382,7 +382,7 @@ jobs:
 
           echo "   HTTP Status: $HTTP_STATUS1"
 
-          if [ "$HTTP_STATUS1" != "200" ]; then
+          if [ "$HTTP_STATUS1" != "200" ] && [ "$HTTP_STATUS1" != "201" ]; then
             echo "   ❌ Upload failed with status $HTTP_STATUS1"
             echo ""
             echo "📋 Response:"
@@ -441,7 +441,7 @@ jobs:
 
           echo "   HTTP Status: $HTTP_STATUS2"
 
-          if [ "$HTTP_STATUS2" != "200" ]; then
+          if [ "$HTTP_STATUS2" != "200" ] && [ "$HTTP_STATUS2" != "201" ]; then
             echo "   ❌ Re-upload failed with status $HTTP_STATUS2"
             echo ""
             echo "📋 Response:"
