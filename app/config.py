@@ -48,14 +48,23 @@ class Settings(BaseSettings):
     MIN_CHUNK_SIZE: int = 256  # Minimum chunk size - smaller chunks will be merged
     CHUNK_OVERLAP: int = 50
 
-    # Storage paths (defaults to /tmp for Lambda, can be overridden for local dev)
-    # UPLOAD_DIR: str = "/tmp/uploads"
-    # CACHE_DIR: str = "/tmp/cached_chunks"
-    UPLOAD_DIR: str = "data/uploads"
-    CACHE_DIR: str = "data/cached_chunks"
-
-    # Storage Backend Configuration (NEW)
+    # Storage Backend Configuration
     STORAGE_BACKEND: str = "s3"  # Options: "local", "s3"
+
+    # Storage paths (auto-detects Lambda environment)
+    @property
+    def UPLOAD_DIR(self) -> str:
+        # Use /tmp in Lambda/production, data/ locally
+        if self.ENVIRONMENT == "production" or self.STORAGE_BACKEND == "s3":
+            return "/tmp/uploads"
+        return "data/uploads"
+
+    @property
+    def CACHE_DIR(self) -> str:
+        # Use /tmp in Lambda/production, data/ locally
+        if self.ENVIRONMENT == "production" or self.STORAGE_BACKEND == "s3":
+            return "/tmp/cached_chunks"
+        return "data/cached_chunks"
 
     # S3 Storage Configuration (for Lambda deployment)
     S3_CACHE_BUCKET: str = "rag-cache-bucket"

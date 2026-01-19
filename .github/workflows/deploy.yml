@@ -188,6 +188,89 @@ jobs:
           echo "✅ Lambda deployment completed!"
           echo "=========================================="
 
+      - name: Configure Lambda Environment for S3 Storage
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "⚙️  Configuring Lambda Environment Variables"
+          echo "=========================================="
+          echo "Function Name: ${{ env.LAMBDA_FUNCTION }}"
+          echo "Storage Backend: S3"
+          echo "S3 Bucket: ${{ secrets.S3_CACHE_BUCKET }}"
+          echo "AWS Region: ${{ env.AWS_REGION }}"
+          echo ""
+
+          # Get current environment variables
+          echo "📥 Fetching current environment variables..."
+          CURRENT_ENV=$(aws lambda get-function-configuration \
+            --function-name ${{ env.LAMBDA_FUNCTION }} \
+            --query 'Environment.Variables' \
+            --output json)
+
+          echo "✅ Current variables fetched"
+          echo ""
+
+          # Merge with S3 configuration
+          echo "🔧 Merging S3 storage configuration..."
+          UPDATED_ENV=$(echo "$CURRENT_ENV" | jq '. + {
+            "STORAGE_BACKEND": "s3",
+            "S3_CACHE_BUCKET": "${{ secrets.S3_CACHE_BUCKET }}",
+            "AWS_REGION": "${{ env.AWS_REGION }}",
+            "ENVIRONMENT": "production"
+          }')
+
+          echo "✅ Configuration merged"
+          echo ""
+
+          # Update Lambda environment variables
+          echo "📤 Updating Lambda environment variables..."
+          aws lambda update-function-configuration \
+            --function-name ${{ env.LAMBDA_FUNCTION }} \
+            --environment "Variables=$UPDATED_ENV" \
+            --no-cli-pager > /dev/null
+
+          echo "✅ Environment variables updated"
+          echo ""
+
+          # Wait for update to complete
+          echo "⏳ Waiting for configuration update to complete..."
+          aws lambda wait function-updated \
+            --function-name ${{ env.LAMBDA_FUNCTION }}
+          echo "✅ Configuration update complete"
+          echo ""
+
+          # Verify configuration
+          echo "🔍 Verifying S3 storage configuration..."
+          STORAGE_BACKEND=$(aws lambda get-function-configuration \
+            --function-name ${{ env.LAMBDA_FUNCTION }} \
+            --query 'Environment.Variables.STORAGE_BACKEND' \
+            --output text)
+
+          S3_BUCKET=$(aws lambda get-function-configuration \
+            --function-name ${{ env.LAMBDA_FUNCTION }} \
+            --query 'Environment.Variables.S3_CACHE_BUCKET' \
+            --output text)
+
+          echo "   Storage Backend: $STORAGE_BACKEND"
+          echo "   S3 Bucket: $S3_BUCKET"
+          echo ""
+
+          if [ "$STORAGE_BACKEND" = "s3" ] && [ "$S3_BUCKET" = "${{ secrets.S3_CACHE_BUCKET }}" ]; then
+            echo "=========================================="
+            echo "✅ S3 Storage Configuration Verified!"
+            echo "=========================================="
+          else
+            echo "=========================================="
+            echo "❌ Configuration Verification Failed"
+            echo "=========================================="
+            echo "Expected Storage Backend: s3"
+            echo "Actual Storage Backend: $STORAGE_BACKEND"
+            echo ""
+            echo "Expected S3 Bucket: ${{ secrets.S3_CACHE_BUCKET }}"
+            echo "Actual S3 Bucket: $S3_BUCKET"
+            exit 1
+          fi
+
       - name: Test deployment
         env:
           API_URL: ${{ secrets.API_GATEWAY_URL }}
@@ -280,4 +363,186 @@ jobs:
           echo "   • Info Endpoint: ✅ Passing"
           echo ""
           echo "🔗 Your API is ready at: $API_URL"
+          echo "=========================================="
+
+      - name: Test S3 Storage Backend
+        env:
+          API_URL: ${{ secrets.API_GATEWAY_URL }}
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "🪣 Testing S3 Storage Backend"
+          echo "=========================================="
+          echo "API Gateway URL: $API_URL"
+          echo "S3 Bucket: ${{ secrets.S3_CACHE_BUCKET }}"
+          echo ""
+
+          # Create a test document
+          echo "📄 Creating test document..."
+          echo "This is a test document for S3 storage validation." > test-s3-storage.txt
+          echo "The document cache should store this in S3." >> test-s3-storage.txt
+          echo "Deployment timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> test-s3-storage.txt
+          echo "Commit SHA: ${{ github.sha }}" >> test-s3-storage.txt
+          echo "✅ Test document created"
+          echo ""
+
+          # Test 1: Initial upload (should NOT be cached)
+          echo "📤 Test 1: Initial document upload (expect cache_hit=false)..."
+          UPLOAD1_RESPONSE=$(curl -s -X POST "$API_URL/upload" \
+            -F "file=@test-s3-storage.txt" \
+            -w "\nHTTP_STATUS:%{http_code}")
+
+          HTTP_STATUS1=$(echo "$UPLOAD1_RESPONSE" | grep "HTTP_STATUS" | cut -d: -f2)
+          UPLOAD1_JSON=$(echo "$UPLOAD1_RESPONSE" | grep -v "HTTP_STATUS")
+
+          echo "   HTTP Status: $HTTP_STATUS1"
+
+          if [ "$HTTP_STATUS1" != "200" ]; then
+            echo "   ❌ Upload failed with status $HTTP_STATUS1"
+            echo ""
+            echo "📋 Response:"
+            echo "$UPLOAD1_JSON"
+            exit 1
+          fi
+
+          echo "   ✅ Upload successful"
+          echo ""
+          echo "📋 Upload Response:"
+          echo "$UPLOAD1_JSON" | jq '.'
+          echo ""
+
+          # Verify storage backend is S3
+          STORAGE_BACKEND1=$(echo "$UPLOAD1_JSON" | jq -r '.storage_backend // "unknown"')
+          CACHE_HIT1=$(echo "$UPLOAD1_JSON" | jq -r '.cache_hit // false')
+          DOC_ID=$(echo "$UPLOAD1_JSON" | jq -r '.document_id // "unknown"')
+
+          echo "🔍 Verification:"
+          echo "   Storage Backend: $STORAGE_BACKEND1"
+          echo "   Cache Hit: $CACHE_HIT1"
+          echo "   Document ID: $DOC_ID"
+          echo ""
+
+          if [ "$STORAGE_BACKEND1" != "s3" ]; then
+            echo "❌ STORAGE BACKEND TEST FAILED"
+            echo "   Expected: s3"
+            echo "   Actual: $STORAGE_BACKEND1"
+            echo ""
+            echo "💡 This means Lambda is not using S3 storage!"
+            echo "   Check STORAGE_BACKEND environment variable in Lambda"
+            exit 1
+          fi
+
+          if [ "$CACHE_HIT1" = "true" ]; then
+            echo "⚠️  Unexpected cache hit on first upload (non-critical)"
+            echo "   This could mean the document was uploaded before"
+          fi
+
+          echo "✅ Test 1 passed: S3 storage backend confirmed"
+          echo ""
+
+          # Wait a moment to ensure S3 has the cached data
+          echo "⏳ Waiting 5 seconds for S3 cache to propagate..."
+          sleep 5
+          echo ""
+
+          # Test 2: Re-upload same document (should be cached in S3)
+          echo "📤 Test 2: Re-upload same document (expect cache_hit=true)..."
+          UPLOAD2_RESPONSE=$(curl -s -X POST "$API_URL/upload" \
+            -F "file=@test-s3-storage.txt" \
+            -w "\nHTTP_STATUS:%{http_code}")
+
+          HTTP_STATUS2=$(echo "$UPLOAD2_RESPONSE" | grep "HTTP_STATUS" | cut -d: -f2)
+          UPLOAD2_JSON=$(echo "$UPLOAD2_RESPONSE" | grep -v "HTTP_STATUS")
+
+          echo "   HTTP Status: $HTTP_STATUS2"
+
+          if [ "$HTTP_STATUS2" != "200" ]; then
+            echo "   ❌ Re-upload failed with status $HTTP_STATUS2"
+            echo ""
+            echo "📋 Response:"
+            echo "$UPLOAD2_JSON"
+            exit 1
+          fi
+
+          echo "   ✅ Re-upload successful"
+          echo ""
+          echo "📋 Re-upload Response:"
+          echo "$UPLOAD2_JSON" | jq '.'
+          echo ""
+
+          # Verify cache hit from S3
+          STORAGE_BACKEND2=$(echo "$UPLOAD2_JSON" | jq -r '.storage_backend // "unknown"')
+          CACHE_HIT2=$(echo "$UPLOAD2_JSON" | jq -r '.cache_hit // false')
+          DOC_ID2=$(echo "$UPLOAD2_JSON" | jq -r '.document_id // "unknown"')
+
+          echo "🔍 Verification:"
+          echo "   Storage Backend: $STORAGE_BACKEND2"
+          echo "   Cache Hit: $CACHE_HIT2"
+          echo "   Document ID: $DOC_ID2"
+          echo "   IDs Match: $([ "$DOC_ID" = "$DOC_ID2" ] && echo "✅ Yes" || echo "❌ No")"
+          echo ""
+
+          if [ "$STORAGE_BACKEND2" != "s3" ]; then
+            echo "❌ STORAGE BACKEND TEST FAILED"
+            echo "   Expected: s3"
+            echo "   Actual: $STORAGE_BACKEND2"
+            exit 1
+          fi
+
+          if [ "$CACHE_HIT2" != "true" ]; then
+            echo "❌ S3 CACHE TEST FAILED"
+            echo "   Expected cache_hit: true"
+            echo "   Actual cache_hit: $CACHE_HIT2"
+            echo ""
+            echo "💡 This means S3 caching is not working correctly!"
+            echo "   Possible issues:"
+            echo "   - S3 bucket permissions not set"
+            echo "   - S3 write succeeded but read failed"
+            echo "   - Hash calculation inconsistency"
+            exit 1
+          fi
+
+          if [ "$DOC_ID" != "$DOC_ID2" ]; then
+            echo "❌ DOCUMENT ID MISMATCH"
+            echo "   First upload: $DOC_ID"
+            echo "   Second upload: $DOC_ID2"
+            echo ""
+            echo "💡 Document IDs should match for identical content!"
+            exit 1
+          fi
+
+          echo "✅ Test 2 passed: S3 cache hit confirmed"
+          echo ""
+
+          # Test 3: Verify S3 bucket contents
+          echo "🪣 Test 3: Verify S3 bucket contents..."
+          echo "   Bucket: ${{ secrets.S3_CACHE_BUCKET }}"
+          echo ""
+
+          # List files for this document in S3
+          echo "📂 Files in S3 for document $DOC_ID:"
+          aws s3 ls "s3://${{ secrets.S3_CACHE_BUCKET }}/txt/$DOC_ID/" --recursive || {
+            echo "⚠️  Could not list S3 bucket contents (non-critical)"
+            echo "   This may be due to IAM permissions for listing"
+          }
+          echo ""
+
+          # Cleanup test file
+          echo "🧹 Cleaning up test document..."
+          rm -f test-s3-storage.txt
+          echo "✅ Cleanup complete"
+          echo ""
+
+          echo "=========================================="
+          echo "✅ S3 STORAGE TESTS PASSED!"
+          echo "=========================================="
+          echo "🎉 S3 storage backend is working correctly!"
+          echo ""
+          echo "📊 Test Summary:"
+          echo "   ✅ S3 storage backend detected"
+          echo "   ✅ Initial upload stored to S3"
+          echo "   ✅ S3 cache hit on re-upload"
+          echo "   ✅ Document ID consistency verified"
+          echo ""
+          echo "🔗 S3 Bucket: s3://${{ secrets.S3_CACHE_BUCKET }}"
           echo "=========================================="
