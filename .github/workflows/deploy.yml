@@ -194,7 +194,15 @@ jobs:
             "PINECONE_INDEX_NAME": "${{ secrets.PINECONE_INDEX_NAME }}",
             "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",
             "DATABASE_URL": "${{ secrets.DATABASE_URL }}",
-            "ENVIRONMENT": "production"
+            "ENVIRONMENT": "production",
+            "HOME": "/tmp",
+            "TMPDIR": "/tmp",
+            "TEMP": "/tmp",
+            "TMP": "/tmp",
+            "HF_HOME": "/tmp/.cache/huggingface",
+            "TRANSFORMERS_CACHE": "/tmp/.cache/huggingface",
+            "UNSTRUCTURED_CACHE_DIR": "/tmp/.cache/unstructured",
+            "DOCLING_CACHE_DIR": "/tmp/.cache/docling"
           }' /tmp/current-vars.json | jq '{Variables: .}' > /tmp/env-config.json
 
           echo "📋 Environment configuration to apply:"
