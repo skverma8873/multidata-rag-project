@@ -52,18 +52,18 @@ RUN --mount=from=uv,source=/uv,target=/bin/uv \
 COPY app/ ${LAMBDA_TASK_ROOT}/app/
 COPY lambda_handler.py ${LAMBDA_TASK_ROOT}/
 
+# Fix file permissions for Lambda runtime (do this in builder stage where find is available)
+RUN chmod -R 755 ${LAMBDA_TASK_ROOT}/app && \
+    chmod 644 ${LAMBDA_TASK_ROOT}/lambda_handler.py && \
+    find ${LAMBDA_TASK_ROOT}/app -type f -name "*.py" -exec chmod 644 {} \;
+
 # ============================================================================
 # Stage 3: Final minimal runtime image
 # ============================================================================
 FROM public.ecr.aws/lambda/python:3.12
 
-# Copy everything from builder stage
+# Copy everything from builder stage (permissions already fixed)
 COPY --from=builder ${LAMBDA_TASK_ROOT} ${LAMBDA_TASK_ROOT}
-
-# Fix file permissions for Lambda runtime
-RUN chmod -R 755 ${LAMBDA_TASK_ROOT}/app && \
-    chmod 644 ${LAMBDA_TASK_ROOT}/lambda_handler.py && \
-    find ${LAMBDA_TASK_ROOT}/app -type f -name "*.py" -exec chmod 644 {} \;
 
 # Set Lambda handler
 CMD ["lambda_handler.handler"]
