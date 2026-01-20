@@ -198,8 +198,26 @@ def parse_and_chunk_with_context(file_path: str, chunk_size: int = 512, min_chun
     Returns:
         List of chunk dictionaries with rich metadata
     """
+    # Fast path for simple text files - bypass Docling to avoid Lambda timeout
+    # This is critical for Lambda performance (Docling causes 30+ second timeout)
+    file_extension = Path(file_path).suffix.lower()
+    if file_extension in ['.txt', '.md', '.csv', '.log', '.json']:
+        logger.info(f"Using fast token-based chunking for {file_extension} file (bypassing Docling)")
+        text = parse_document(file_path)  # Uses fast path internally
+        chunks = chunk_text(text, chunk_size=chunk_size, overlap=50)
+
+        # Add empty metadata fields for compatibility
+        for chunk in chunks:
+            chunk['headings'] = []
+            chunk['page_numbers'] = []
+            chunk['doc_items'] = []
+            chunk['captions'] = []
+
+        logger.info(f"Fast chunking complete: {len(chunks)} chunks")
+        return chunks
+
     try:
-        # Try Docling first (context-aware chunking with merging)
+        # Try Docling for complex formats (PDF, DOCX, etc.)
         from app.services.docling_service import parse_and_chunk_document
 
         logger.info(f"Using Docling for context-aware chunking: {Path(file_path).name}")
