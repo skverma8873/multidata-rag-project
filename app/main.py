@@ -896,6 +896,14 @@ async def unified_query(question: str, auto_approve_sql: bool = False, top_k: in
                     sql_result['query_id'],
                     approved=True
                 )
+
+                # Check if execution failed
+                if execution_result.get('status') == 'error':
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"SQL execution failed: {execution_result.get('error', 'Unknown error')}"
+                    )
+
                 result.update({
                     "sql": execution_result['sql'],
                     "results": execution_result['results'],

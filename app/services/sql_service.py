@@ -218,10 +218,10 @@ class VannaAgentWrapper:
 
     async def _execute_and_extract_results(self, sql: str) -> List[Dict[str, Any]]:
         """
-        Execute SQL directly using PostgresRunner and return results.
+        Execute SQL directly using psycopg2 and return results.
 
-        The Agent is designed for end-to-end flow (question → SQL → results).
-        For executing pre-generated SQL, we use the PostgresRunner directly.
+        PostgresRunner.run_sql() is designed to be called by the Agent as a Tool,
+        not directly. For manual SQL execution, we use psycopg2 directly.
 
         Args:
             sql: SQL query to execute
@@ -229,22 +229,35 @@ class VannaAgentWrapper:
         Returns:
             List of row dictionaries
         """
-        logger.info(f"Executing SQL via PostgresRunner: {sql[:100]}...")
+        logger.info(f"Executing SQL directly: {sql[:100]}...")
 
         try:
-            # Execute SQL directly using the PostgresRunner
-            # This returns a pandas DataFrame
-            df = self.postgres_runner.run_sql(sql)
+            import psycopg2
+            import psycopg2.extras
 
-            if df is None or df.empty:
-                logger.info("Query executed successfully but returned no results")
-                return []
+            # Connect to database using the connection string
+            conn = psycopg2.connect(self.postgres_runner.connection_string)
 
-            # Convert DataFrame to list of dictionaries
-            results = df.to_dict('records')
-            logger.info(f"✓ SQL executed successfully: {len(results)} rows returned")
+            try:
+                # Execute query
+                cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cursor.execute(sql)
 
-            return results
+                # Fetch results
+                rows = cursor.fetchall()
+
+                # Convert RealDictRow objects to regular dicts
+                results = [dict(row) for row in rows]
+
+                cursor.close()
+                conn.close()
+
+                logger.info(f"✓ SQL executed successfully: {len(results)} rows returned")
+                return results
+
+            except Exception as e:
+                conn.close()
+                raise e
 
         except Exception as e:
             logger.error(f"SQL execution failed: {e}")
