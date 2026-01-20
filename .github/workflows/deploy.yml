@@ -372,19 +372,35 @@ jobs:
           echo ""
 
           # Force Lambda cold start by waiting for old containers to expire
-          echo "⏳ Waiting 60 seconds for Lambda to fully switch to new containers..."
+          # Lambda keeps containers warm for 5-15 minutes, so we wait 2 minutes to be safe
+          echo "⏳ Waiting 120 seconds for Lambda to fully switch to new containers..."
           echo "   (Old warm containers from previous deployment must expire)"
-          for i in {60..1}; do
-            echo -n "   $i seconds remaining..."
+          for i in {120..1}; do
+            if [ $((i % 10)) -eq 0 ]; then
+              echo "   $i seconds remaining..."
+            fi
             sleep 1
-            echo -ne "\r"
           done
-          echo "   ✅ Wait complete!"
+          echo "   ✅ Wait complete - old containers should be expired!"
           echo ""
 
-          # Warm up Lambda with a health check (triggers lazy initialization)
-          echo "🔥 Warming up Lambda with health check (triggers lazy init)..."
-          curl -f -s "$API_URL/health" > /dev/null && echo "   ✅ Health check passed, Lambda warmed up!" || echo "   ⚠️  Health check failed (will retry on upload)"
+          # Warm up Lambda with multiple health checks (triggers lazy init in NEW containers)
+          # Multiple invocations ensure we hit new containers, not just old warm ones
+          echo "🔥 Warming up Lambda with multiple health checks (triggers lazy init)..."
+          echo "   (Invoking 5 times to ensure we hit new containers)"
+          WARMED_UP=0
+          for i in {1..5}; do
+            echo -n "   Attempt $i..."
+            if curl -f -s "$API_URL/health" > /dev/null 2>&1; then
+              echo " ✅"
+              WARMED_UP=$((WARMED_UP + 1))
+            else
+              echo " ❌"
+            fi
+            sleep 1
+          done
+          echo "   🎯 $WARMED_UP/5 health checks passed"
+          echo "   (Multiple containers should now be warmed up)"
           echo ""
 
           # Test 1: Initial upload (should NOT be cached)
