@@ -358,6 +358,17 @@ async def upload_document(file: UploadFile = File(...)):
             except Exception as e:
                 logger.warning(f"Failed to update OPIK span: {e}")
 
+        # Determine storage backend type
+        storage_backend = "none"
+        if cache_service:
+            storage_class = type(cache_service.storage).__name__
+            if "S3" in storage_class:
+                storage_backend = "s3"
+            elif "Local" in storage_class:
+                storage_backend = "local"
+            else:
+                storage_backend = storage_class.lower()
+
         return {
             "status": "success",
             "filename": file.filename,
@@ -367,7 +378,7 @@ async def upload_document(file: UploadFile = File(...)):
             "chunks_created": len(chunks),
             "total_tokens": total_tokens,
             "cache_hit": cache_hit,  # NEW: Indicate if cache was used
-            "storage_backend": cache_service.backend if cache_service else "none",  # NEW: Report storage backend
+            "storage_backend": storage_backend,  # NEW: Report storage backend
             "message": (
                 f"Document loaded from cache and {len(chunks)} chunks stored in Pinecone"
                 if cache_hit
