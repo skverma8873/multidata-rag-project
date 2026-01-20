@@ -235,21 +235,29 @@ class VannaAgentWrapper:
 
         logger.info(f"Executing SQL via Vanna Agent: {sql[:100]}...")
 
+        component_count = 0
         async for component in self.agent.send_message(
             request_context=request_context,
             message=message
         ):
+            component_count += 1
             rich_comp = component.rich_component
 
             # Log component type for debugging Lambda issues
             component_type = type(rich_comp).__name__
-            logger.debug(f"Received component: {component_type}")
+            logger.info(f"Received component #{component_count}: {component_type}")
 
             # Extract data from DataFrameComponent
-            if hasattr(rich_comp, 'rows') and rich_comp.rows:
-                results = rich_comp.rows
-                logger.info(f"✓ Found results: {len(results)} rows")
-                break  # ✅ Exit immediately - critical for Lambda compatibility
+            if hasattr(rich_comp, 'rows'):
+                logger.info(f"Component has .rows attribute: {rich_comp.rows is not None}, length: {len(rich_comp.rows) if rich_comp.rows else 0}")
+                if rich_comp.rows:
+                    results = rich_comp.rows
+                    logger.info(f"✓ Found results: {len(results)} rows - exiting loop")
+                    break  # ✅ Exit immediately - critical for Lambda compatibility
+            else:
+                logger.info(f"Component does NOT have .rows attribute")
+
+        logger.info(f"Async loop completed. Total components received: {component_count}")
 
         if not results:
             logger.warning("No results found in Agent response stream")
